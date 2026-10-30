@@ -1,7 +1,8 @@
 import { HttpError } from './http.js';
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
+// llama-3.3-70b-versatile Groq отключил 16.08.2026; рекомендованная замена — gpt-oss-120b.
+const DEFAULT_MODEL = 'openai/gpt-oss-120b';
 // Сколько раз пробуем заново, если модель вернула невалидный ответ.
 const OUTPUT_ATTEMPTS = 2;
 const MAX_NUMBERED_KEYS = 10;
@@ -15,11 +16,21 @@ export function getApiKeys(env = process.env) {
   return [...new Set(keys)];
 }
 
+function parseGroqError(details) {
+  try {
+    const { error } = JSON.parse(details);
+    return { code: String(error?.code ?? ''), message: String(error?.message ?? '') };
+  } catch {
+    return { code: '', message: details.slice(0, 200) };
+  }
+}
+
 // Запрашивает у Groq ответ в режиме JSON и возвращает разобранный объект.
 // Ключи берутся только из переменных окружения сервера и никогда не попадают в браузер.
 // Если ключ упёрся в лимит или не принят, запрос повторяется со следующим ключом.
-export async function generateJson({ system, user, maxTokens = 8000, temperature = 0.6 }) {
+export async function generateJson({ system, user, maxTokens = 12000, temperature = 0.6 }) {
   const keys = getApiKeys();
+  const model = process.env.GROQ_MODEL?.trim() || DEFAULT_MODEL;
   if (!keys.length) {
     throw new HttpError(500, 'На сервере не задан ключ GROQ_API_KEY. Обратитесь к администратору сайта.');
   }
@@ -30,6 +41,7 @@ export async function generateJson({ system, user, maxTokens = 8000, temperature
   let badOutputs = 0;
   let rateLimitedKeys = 0;
   let rejectedKeys = 0;
+  let tooLargeKeys = 0;
   let lastError = new HttpError(502, 'Сервис генерации временно недоступен. Попробуйте ещё раз.');
 
   while (keyOffset < keys.length && badOutputs < OUTPUT_ATTEMPTS) {
@@ -41,7 +53,7 @@ export async function generateJson({ system, user, maxTokens = 8000, temperature
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: process.env.GROQ_MODEL || DEFAULT_MODEL,
+        model,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: user },
@@ -49,20 +61,34 @@ export async function generateJson({ system, user, maxTokens = 8000, temperature
         temperature,
         max_tokens: maxTokens,
         response_format: { type: 'json_object' },
+        // gpt-oss — рассуждающая модель; средний уровень рассуждений
+        // заметно улучшает методическое качество и почти не замедляет ответ.
+        ...(model.startsWith('openai/gpt-oss') ? { reasoning_effort: 'medium' } : {}),
       }),
     });
 
     if (!response.ok) {
       const details = await response.text();
       console.error(`Groq error ${response.status} (key #${keyNumber}):`, details.slice(0, 500));
+      const groqError = parseGroqError(details);
+      if (response.status === 404 || /model_(not_found|decommissioned)/.test(groqError.code)) {
+        throw new HttpError(500, `Модель «${model}» недоступна в Groq. Укажите другую модель в переменной GROQ_MODEL.`);
+      }
+      if (response.status === 400 && groqError.code !== 'json_validate_failed') {
+        throw new HttpError(502, `Groq отклонил запрос: ${groqError.message || 'неизвестная ошибка'}`);
+      }
       if (response.status === 401 || response.status === 403) {
         rejectedKeys++;
         keyOffset++;
       } else if (response.status === 429) {
         rateLimitedKeys++;
         keyOffset++;
+      } else if (response.status === 413) {
+        // Запрос не помещается в лимит токенов в минуту тарифа этого ключа.
+        tooLargeKeys++;
+        keyOffset++;
       } else if (response.status === 400 || response.status >= 500) {
-        // 400 у Groq чаще всего означает json_validate_failed — модель выдала невалидный JSON.
+        // json_validate_failed (модель выдала невалидный JSON) или сбой на стороне Groq.
         badOutputs++;
       } else {
         break;
@@ -87,6 +113,12 @@ export async function generateJson({ system, user, maxTokens = 8000, temperature
 
   if (rejectedKeys === keys.length) {
     throw new HttpError(500, 'Ключи Groq API не приняты. Проверьте GROQ_API_KEY в настройках сервера.');
+  }
+  if (tooLargeKeys && tooLargeKeys + rateLimitedKeys + rejectedKeys === keys.length) {
+    throw new HttpError(
+      413,
+      'Запрос не помещается в лимит токенов вашего тарифа Groq. Сократите пожелания или подключите ключ с бо́льшим лимитом.',
+    );
   }
   if (rateLimitedKeys + rejectedKeys === keys.length) {
     throw new HttpError(429, 'Слишком много запросов. Подождите минуту и попробуйте снова.');
