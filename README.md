@@ -14,7 +14,7 @@ api/                    серверные функции Vercel (ключ Groq 
   presentation.js       POST /api/presentation
   ksp.js                POST /api/ksp
   _lib/prompts.js       системные промпты для генерации
-  _lib/groq.js          запрос к Groq в JSON-режиме, повтор при сбое
+  _lib/groq.js          запрос к Groq в JSON-режиме, смена ключа при лимите
   _lib/sanitize.js      проверка структуры ответа модели
 src/                    интерфейс на React + Vite
   pages/                главная, презентация, КСП
@@ -26,7 +26,7 @@ src/                    интерфейс на React + Vite
 
 ```bash
 npm install
-cp .env.example .env   # вставьте GROQ_API_KEY
+cp .env.example .env   # вставьте ключи Groq
 npm run dev
 ```
 
@@ -35,12 +35,15 @@ npm run dev
 ## Деплой на Vercel
 
 1. Импортируйте репозиторий на [vercel.com/new](https://vercel.com/new). Фреймворк Vite определится автоматически.
-2. В **Settings → Environment Variables** добавьте `GROQ_API_KEY`. По желанию добавьте `GROQ_MODEL` (по умолчанию `llama-3.3-70b-versatile`).
+2. В **Settings → Environment Variables** добавьте ключи `GROQ_API_KEY_1`, `GROQ_API_KEY_2` … `GROQ_API_KEY_5` (достаточно одного). По желанию добавьте `GROQ_MODEL` (по умолчанию `llama-3.3-70b-versatile`).
 3. Нажмите **Deploy**.
 
 ## Переменные окружения
 
-| Переменная     | Обязательна | Описание                                          |
-| -------------- | ----------- | ------------------------------------------------- |
-| `GROQ_API_KEY` | да          | ключ из https://console.groq.com/keys             |
-| `GROQ_MODEL`   | нет         | модель Groq, по умолчанию `llama-3.3-70b-versatile` |
+| Переменная                              | Обязательна        | Описание                                            |
+| --------------------------------------- | ------------------ | --------------------------------------------------- |
+| `GROQ_API_KEY_1` … `GROQ_API_KEY_10`    | хотя бы один ключ  | ключи из https://console.groq.com/keys              |
+| `GROQ_API_KEY`                          | можно вместо них   | один ключ или несколько через запятую               |
+| `GROQ_MODEL`                            | нет                | модель Groq, по умолчанию `llama-3.3-70b-versatile` |
+
+Ключей можно указать несколько. Каждый запрос начинается со случайного ключа, а если ключ упёрся в лимит (429) или не принят (401/403), запрос сразу повторяется со следующим.
